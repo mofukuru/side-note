@@ -265,6 +265,10 @@ export class CommentManager {
     // Returns true if any comment's stored data was changed, so callers can decide
     // whether a save is needed.
     updateCommentCoordinatesForFile(fileContent: string, filePath: string): boolean {
+        // vault.read() returns the raw file, but CodeMirror normalizes line breaks to
+        // "\n". Count offsets in the editor's space, or every "\r" before a comment
+        // shifts it by one and the editor highlight no longer matches.
+        fileContent = fileContent.replace(/\r\n?/g, '\n');
         const fileComments = this.comments.filter(c => c.filePath === filePath);
         const lines = fileContent.split('\n');
         let changed = false;
