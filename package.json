@@ -1,6 +1,6 @@
 {
 	"name": "side-note",
-	"version": "1.3.0",
+	"version": "1.3.1",
 	"description": "Add comment on the part of sentence and refer in comment view.",
 	"main": "main.js",
 	"scripts": {
