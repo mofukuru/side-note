@@ -86,6 +86,7 @@ export default class SideNote extends Plugin {
         await this.loadPluginData();
 
         this.commentManager = new CommentManager(this.comments);
+        this.applyHighlightColor();
         await this.migrateComments();
 
         this.registerEditorExtension([createHighlightPlugin(this)]);
@@ -478,7 +479,7 @@ export default class SideNote extends Plugin {
             allowEmptyComments: loadedData.allowEmptyComments !== undefined ? loadedData.allowEmptyComments : DEFAULT_SETTINGS.allowEmptyComments,
         };
         this.comments = loadedData.comments || [];
-        this.applyHighlightColor();
+        if (this.commentManager) this.applyHighlightColor();
         this.lastDataFingerprint = this.getDataFingerprint(loadedData);
     }
 
