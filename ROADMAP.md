@@ -1,107 +1,112 @@
-# SideNote ロードマップ
+# SideNote Roadmap
 
-最終更新: 2026-10-04（v1.2.0 時点）
+English | [日本語](ROADMAP-ja.md)
 
-## 現状
+Last updated: 2026-10-13 (as of v1.3.0)
 
-- 最新リリース: **v1.2.0**
-- レビュー待ち: **PR #41** ハイライト色の複数化（#40）
-- 未対応の issue:
-  - #19 Wish list — 大半は対応済み。残りは「Markdown バックアップの双方向化」で、フェーズ1で対応する
-  - #9 Docx へのコメント出力 — フェーズ3で対応する
+## Status
 
-## フェーズ1: 保存形式 v2（Markdown サイドカーを正本にする）
+- Latest release: **v1.3.0** (multiple highlight colors, #40)
+- Awaiting review: **PR #43** fix for editor highlights disappearing in notes with CRLF line endings
+- Open issues:
+  - #19 Wish list — mostly done. The remaining item, two-way Markdown backup, is covered by Phase 1
+  - #9 Exporting comments to Docx — covered by Phase 3
 
-### 目的
+## Phase 1: Storage format v2 (Markdown sidecars as the source of truth)
 
-現在はすべてのコメントを `.obsidian/plugins/side-note/data.json` の1ファイルで管理しており、次の問題がある。
+### Goal
 
-- 同期の設定によってはコメントが同期されない。2台で同時に編集すると、全体が後勝ちで上書きされる
-- 隠しフォルダにあるため、人間や AI から読めない・書けない
-- Markdown バックアップは「Create Backup」ボタンで一度書き出すだけなので、すぐ古くなる（#19）
+All comments are currently stored in a single file, `.obsidian/plugins/side-note/data.json`. This causes several problems:
 
-これを、Kanban プラグインのように「ノートごとの Markdown ファイルを正本とし、プラグインがそれを読み取って表示する」方式に変える。
+- Depending on sync settings, comments may not sync at all. When two devices edit at the same time, the whole file is overwritten by whichever saves last
+- It lives in a hidden folder, so neither humans nor AI can read or write it
+- The Markdown backup is a one-time export via the "Create Backup" button, so it goes stale quickly (#19)
 
-### 書式（案）
+Like the Kanban plugin, we will switch to a model where a Markdown file per note is the source of truth, and the plugin reads it to display comments.
+
+### Format (draft)
 
 ```markdown
 ---
 sidenote-format: 2
-source: "memo/問題発見.md"
+source: "memo/notes.md"
 ---
 
-# Side Notes for memo/問題発見.md
+# Side Notes for memo/notes.md
 
-## とき、順番に
-<!-- sidenote {"id":"a1","color":"red","author":"mofukuru","prefix":"その","suffix":"声を"} -->
-ここは自由に編集してよい本文（Markdown）
+## the quoted text
+<!-- sidenote {"id":"a1","color":"red","author":"mofukuru","prefix":"before ","suffix":" after"} -->
+Comment body (Markdown) that can be edited freely
 
 ---
 ```
 
-- `## 見出し`: コメントを付けた箇所の文字列。表示用で、保存のたびに作り直す
-- `<!-- sidenote {...} -->`: プログラムが使うデータを1行の JSON で書く。Reading view では表示されない
-- 位置はオフセットではなく「引用文 + 前後の文字列（`prefix` / `suffix`）」で特定する。W3C Web Annotation の TextQuoteSelector と同じ考え方で、ファイルが編集されても見つけやすく、AI も検索で見つけられる。オフセットはキャッシュとして扱う
+- `## heading`: the text the comment is attached to. For display only, regenerated on every save
+- `<!-- sidenote {...} -->`: data used by the program, as one line of JSON. Hidden in Reading view
+- Positions are identified by the quote plus the surrounding text (`prefix` / `suffix`) rather than by offsets. This is the same idea as the W3C Web Annotation TextQuoteSelector: it survives edits to the file and is easy for AI to find by searching. Offsets are treated as a cache
 
-### 寛容なパーサー
+### Lenient parser
 
-試作済み: `src/core/sidecarFormat.ts`、テスト: `tests/sidecarFormat.test.ts`（11件すべて合格）。プラグイン本体にはまだ組み込んでいない。
+Prototype: `src/core/sidecarFormat.ts`, tests: `tests/sidecarFormat.test.ts` (all 11 pass). Not yet wired into the plugin.
 
-原則は **「解釈できないものも捨てず、本文か前置き部分として残す」**。
+The principle is **"never discard what we cannot interpret; keep it as body text or preamble"**.
 
-| 状況 | 動作 |
+| Situation | Behavior |
 |---|---|
-| 人が本文を書き換える（改行コード CRLF も含む） | 本文だけ更新し、メタ情報は残す |
-| 本文の中に `## 見出し` や `---` がある | 本文の一部として扱う |
-| マーカーなしの `## 引用文` + 本文を追記する | 新しいコメントとして扱い、ID は後で付ける |
-| JSON が壊れている | ID を拾い直し、本文を残し、警告を出す |
-| マーカーの行が消された | 新しいコメントとして扱い、文字は失わない |
-| ID が重複している（コピペ） | 2つ目を新しいコメントとして扱う |
-| 知らない項目がある（新しいバージョンのデータ） | 消さずにそのまま書き戻す |
-| 旧形式のマーカー `<!-- side-note:ID -->` | ID として読み込む |
+| A person edits the body (including CRLF line endings) | Update only the body, keep the metadata |
+| The body contains `## heading` or `---` | Treat it as part of the body |
+| A `## quote` + body is appended without a marker | Treat it as a new comment; assign an ID later |
+| The JSON is broken | Recover the ID, keep the body, show a warning |
+| The marker line was deleted | Treat it as a new comment without losing any text |
+| Duplicate IDs (copy and paste) | Treat the second one as a new comment |
+| Unknown fields (data from a newer version) | Write them back unchanged |
+| Old-style marker `<!-- side-note:ID -->` | Read it as the ID |
 
-### 後方互換性の方針
+### Backward compatibility
 
-1. **形式にバージョン番号を付ける**: サイドカーに `sidenote-format`、`data.json` に `storageVersion` を書く。知らない新しい形式を見つけたら読み取り専用にして、上書きしない
-2. **安全に移行する**: 移行前に `data.json` を `data.v1-backup.json` に退避する。古いデータは削除しない。何度実行しても同じ結果になるようにする。移行が終わったら通知を一度だけ出す。移行時は古い可能性がある既存の md バックアップより `data.json` の内容を優先する
-3. **v2.x の間は二重に書き込む**: `data.json` にもキャッシュとしてコメントを書き、v1.2 に戻しても失われないようにする。廃止するときは事前に予告する
-4. **実際の古いデータでテストする**: v1 のデータの見本を `tests/fixtures/` に置き、CI で移行テストを毎回実行する
-5. **ベータ版は出さない**（決定済み）。安全性は 3 と 4 で確保する
+1. **Version the format**: write `sidenote-format` in sidecars and `storageVersion` in `data.json`. When an unknown newer format is found, open it read-only and never overwrite it
+2. **Migrate safely**: back up `data.json` to `data.v1-backup.json` before migrating. Never delete old data. Make migration idempotent. Show a notice once when it finishes. During migration, prefer `data.json` over existing Markdown backups, which may be stale
+3. **Write both during v2.x**: also write comments to `data.json` as a cache, so nothing is lost when downgrading to v1.2. Announce in advance before dropping this
+4. **Test with real old data**: put samples of v1 data in `tests/fixtures/` and run the migration tests in CI on every change
+5. **No beta releases** (decided). Safety comes from 3 and 4
 
-### タスク
+### Tasks
 
-- [ ] 試作パーサーを本実装にする（`id: null` のブロックへの ID 付与、`prefix` / `suffix` の生成）
-- [ ] v1 → v2 の移行処理と、`tests/fixtures/` を使った移行テスト
-- [ ] サイドカーの読み込み・変更の検知（vault の `modify` イベント）と、メモリ上の索引
-- [ ] 自分の書き込みで再読み込みが走るループを防ぐ（今の `isSavingData` の仕組みを流用）
-- [ ] 保存処理を差し替える（サイドカーと `data.json` の二重書き込み）
-- [ ] ノートの名前変更・削除にサイドカーを追従させる
-- [ ] CI で `npm test` を実行する（`ci.yml` に追加）
-- [ ] README（英語・日本語）に新しい形式と、AI や人が手で書くときの書き方を記載する
+- [ ] Turn the prototype parser into the real implementation (assign IDs to `id: null` blocks, generate `prefix` / `suffix`)
+- [ ] v1 → v2 migration, with migration tests using `tests/fixtures/`
+- [ ] Load sidecars, detect changes (vault `modify` event), and keep an in-memory index
+- [ ] Avoid reload loops triggered by our own writes (reuse the current `isSavingData` mechanism)
+- [ ] Replace the save path (write to both sidecars and `data.json`)
+- [ ] Keep sidecars in sync when notes are renamed or deleted
+- [ ] Run `npm test` in CI (add it to `ci.yml`)
+- [ ] Document the new format in the README (English and Japanese), including how AI or people can write it by hand
 
-### 未検証のリスク
+### Unverified risks
 
-- Obsidian Sync などで、同じサイドカーが複数の端末から同時に変更された場合の扱い
-- コメントが非常に多いノートでの読み込み速度
+- How to handle the same sidecar being changed from several devices at once, e.g. via Obsidian Sync
+- Load time for notes with a very large number of comments
 
-## フェーズ2: 作者欄と返信
+## Phase 2: Authors and replies
 
-v2 の書式の上に追加する。
+Built on top of the v2 format.
 
-- **作者欄**: 設定に「表示名」を追加し、`author` に保存する。AI が書くときは `claude` などと名乗らせ、人と区別できるようにする
-- **返信**: `replies: [{ id, author, body, timestamp }]`。サイドカーではコメント本文の下に小見出しで並べる形を想定
-- サイドバーにスレッド表示と返信の入力欄を追加する
+- **Author**: add a "display name" setting and save it as `author`. When AI writes, it identifies itself (e.g. `claude`) so it can be told apart from people
+- **Replies**: `replies: [{ id, author, body, timestamp }]`. In sidecars, listed under the comment body with subheadings
+- Add a threaded view and a reply box to the sidebar
 
-## フェーズ3: 外部連携
+## Phase 3: Integrations
 
-- **#9 Docx 出力**: Pandoc は `[引用]{.comment-start id="0" author="..." date="..."}…[]{.comment-end id="0"}` という書き方を Word のコメントに変換できる。サイドカーと作者欄があれば、ほぼ変換するだけで実装できる
-- **AI 連携**: サイドカーの書き方を README に明記し、AI がノートを読んでコメントを追加・返信できるようにする
+- **#9 Docx export**: Pandoc converts `[quote]{.comment-start id="0" author="..." date="..."}…[]{.comment-end id="0"}` into Word comments. With sidecars and authors in place, this is mostly a conversion step
+- **AI integration**: document the sidecar format in the README so AI can read notes and add or reply to comments
 
-## 細かい改善・要確認
+## Small improvements / to check
 
-- [ ] Reading view で解決済みのコメントもハイライトされている可能性がある（エディタ側は除外しているが、`applyRenderedHighlights` は除外していない）
-- [ ] `main.ts` の `modify` ハンドラにある `data.json` のパス（`.obsidian/plugins/side-note/data.json`）が決め打ちになっている。`.obsidian` 配下にはそもそもイベントが来ないため、実際には2秒ごとのポーリングで動いている。v2 で整理する
-- [ ] `markdownCommentBlocks.ts` の `replaceMarkdownCommentBlock` / `removeMarkdownCommentBlock` がどこからも使われていない。v2 で置き換えたら削除する
-- [ ] 「Show highlights in editor」の説明に「再起動が必要」とあるが、実際に必要か確認する
-- [ ] lint の警告4件（non-null assertion）
-- [ ] #19 の残り: 「解決」と「削除」の違いを UI で分かりやすくする、オーファン化したコメントの表示
+- [ ] Resolved comments may still be highlighted in Reading view (the editor excludes them, but `applyRenderedHighlights` does not)
+- [ ] The `modify` handler in `main.ts` hardcodes the `data.json` path (`.obsidian/plugins/side-note/data.json`). Events never fire under `.obsidian`, so in practice the 2-second polling does the work. Clean up in v2
+- [ ] `replaceMarkdownCommentBlock` / `removeMarkdownCommentBlock` in `markdownCommentBlocks.ts` are unused. Delete them once v2 replaces them
+- [ ] The "Show highlights in editor" description says a restart is required; check whether it really is
+- [ ] 4 lint warnings (non-null assertion)
+- [ ] Rest of #19: make the difference between "resolve" and "delete" clearer in the UI, and show orphaned comments
+- [ ] Detect and relink comments that point to a note that no longer exists. When a note is moved outside Obsidian (`mv`, git, or while Obsidian is closed), no `rename` event fires and `filePath` keeps the old path. `isOrphaned` is not set either, so the comment is shown nowhere and no warning appears
+  - Check that each `filePath` exists on startup and on the `delete` event, and show the count in the settings
+  - If a note with the same file name contains the `selectedText`, offer to relink it (otherwise let the user pick)
