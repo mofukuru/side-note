@@ -23,6 +23,10 @@ export interface SideNoteSettings {
     highlightStyle: HighlightStyle;
     showResolvedComments: boolean;
     allowEmptyComments: boolean;
+    /** Re-link automatically when the evidence is a content-hash or quoted-text match. */
+    autoRelink: boolean;
+    /** Also re-link automatically when the file name changed (a rename, not a move). */
+    autoRelinkRenames: boolean;
 }
 
 export interface PluginData extends SideNoteSettings {
@@ -42,6 +46,7 @@ export interface SideNotePlugin {
     setCommentColor(id: string, color: CommentColor | null): Promise<void>;
     unresolveComment(id: string): Promise<void>;
     activateViewAndHighlightComment(commentId: string): Promise<void>;
+    isLinkMissing(filePath: string): boolean;
     saveData(): Promise<void>;
     refreshEditorDecorations(): void;
     applyHighlightColor(): void;
@@ -58,4 +63,6 @@ export const DEFAULT_SETTINGS: SideNoteSettings = {
     highlightStyle: "both",
     showResolvedComments: false,
     allowEmptyComments: false,
+    autoRelink: true,
+    autoRelinkRenames: true,
 };

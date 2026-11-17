@@ -57,3 +57,109 @@ test("LF file: correct offsets are left unchanged", () => {
     assert.equal(changed, false);
     assert.equal(comment.startOffset, lfOffset);
 });
+
+// P1: a comment carrying context survives an edit that moves or reshapes its quote. The old
+// ±10-line hash search could not: one changed space was enough to lose it.
+const longNote = (): string => {
+    const filler = Array.from({ length: 60 }, (_, i) => `filler line ${i}`).join("\n");
+    return `${filler}\nbasket the apple here\n${filler}`;
+};
+
+test("a quote moved far from its stored position is recovered through context", () => {
+    const content = longNote();
+    const start = content.indexOf("basket the apple");
+    const comment = makeComment({
+        selectedText: "basket the apple",
+        startLine: 1, startChar: 0,
+        prefix: content.slice(start - 32, start),
+        suffix: content.slice(start + "basket the apple".length, start + "basket the apple".length + 32),
+    });
+
+    const changed = new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(changed, true);
+    assert.equal(comment.isOrphaned, false);
+    assert.equal(comment.startOffset, start);
+    assert.equal(comment.anchorNeedsReview, false, "an exact unique match needs no review");
+});
+
+test("whitespace inside the note does not lose the quote", () => {
+    const content = "before\nthe   quick\nbrown    fox\n\nafter";
+    const comment = makeComment({
+        selectedText: "the quick brown fox",
+        startLine: 1, startChar: 0,
+        prefix: "before\n",
+        suffix: "\n\nafter",
+    });
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(comment.isOrphaned, false);
+    assert.equal(comment.anchorNeedsReview, true, "a loose match is reported for review");
+});
+
+test("a comment without context still uses the legacy exact search", () => {
+    const content = "alpha\nbeta target gamma\n";
+    const comment = makeComment({ selectedText: "beta target", startLine: 0, startChar: 0 });
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(comment.isOrphaned, false);
+    assert.equal(comment.startOffset, content.indexOf("beta target"));
+});
+
+test("a quote that no longer exists stays orphaned", () => {
+    const comment = makeComment({
+        selectedText: "vanished sentence",
+        startLine: 1, startChar: 0,
+        prefix: "before\n",
+        suffix: "\nafter",
+    });
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile("before\nsomething else\nafter", "note.md");
+
+    assert.equal(comment.isOrphaned, true);
+});
+
+// The resolver returning a low score is not enough: the comment record has to carry the flag,
+// on both the normal path and the orphan-recovery path. Otherwise a tie is accepted silently.
+const ambiguousNote = (): string => {
+    const block = "before\nsame sentence\nAfter";
+    return `${block}\nseparator\n${block}`;
+};
+
+test("an ambiguous duplicate is flagged on the normal recovery path", () => {
+    const content = ambiguousNote();
+    const comment = makeComment({
+        selectedText: "same sentence",
+        startLine: 0, startChar: 0,
+        prefix: "before\n",
+        suffix: "\nAfter",
+    });
+    // Stale offsets that cannot match, so the fast paths are skipped.
+    comment.startOffset = 0;
+    comment.endOffset = 3;
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(comment.isOrphaned, false, "the text exists, so the comment is not orphaned");
+    assert.equal(comment.anchorNeedsReview, true, "but which copy is unknown, so it needs review");
+});
+
+test("an ambiguous duplicate is flagged on the orphan recovery path", () => {
+    const content = ambiguousNote();
+    const comment = makeComment({
+        selectedText: "same sentence",
+        startLine: 0, startChar: 0,
+        prefix: "before\n",
+        suffix: "\nAfter",
+    });
+    comment.isOrphaned = true;
+    comment.startOffset = 0;
+    comment.endOffset = 3;
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(comment.isOrphaned, false, "the orphan recovery found the text again");
+    assert.equal(comment.anchorNeedsReview, true, "and it inherited the same ambiguity rule");
+});

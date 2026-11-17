@@ -1,4 +1,5 @@
 import type { CommentColor } from "./types";
+import { findAnchor } from "./core/anchorResolver";
 
 export interface Comment {
     id: string;
@@ -14,10 +15,25 @@ export interface Comment {
     endOffset?: number;
     selectedText: string;
     selectedTextHash: string;
+    /**
+     * Up to 32 characters before/after the selection when the comment was created. They are
+     * what makes a moved paragraph findable after an edit (see core/anchorResolver.ts).
+     */
+    prefix?: string;
+    suffix?: string;
+    /** True when the anchor was recovered, but with less certainty than an exact match. */
+    anchorNeedsReview?: boolean;
     comment: string;
     timestamp: number;
     isOrphaned?: boolean;
     isNoteComment?: boolean;
+    /**
+     * SHA-256 of the note content when the comment was created or last re-linked. Absent for
+     * comments older than this feature; used as the strongest clue when a note is renamed.
+     */
+    fileHashAtAttach?: string;
+    /** Byte length at attach time; cheap prefilter for content matching after a rename. */
+    fileSizeAtAttach?: number;
     commentPath?: string;
     resolved?: boolean;
     resolvedAt?: number | null;
@@ -290,12 +306,17 @@ export class CommentManager {
                     changed = true;
                     continue;
                 }
-                // Last resort: the selected text may still exist elsewhere in the file.
-                // When a comment is orphaned its offset/coords are collapsed to a single
-                // point, so the two fast paths above cannot find it even though the text
-                // is still present. Search the whole document for the exact text and
-                // recover the comment if a match is found.
-                if (this.recoverOrphanByExactText(fileContent, comment)) {
+                // Last resort: the selected text may still exist elsewhere in the file. When a
+                // comment is orphaned its offset/coords are collapsed, so the fast paths above
+                // cannot find it. Use the same anchor rules as the normal path, so an
+                // indistinguishable duplicate is flagged for review instead of guessed.
+                const recovered = this.resolveAnchor(fileContent, comment);
+                if (recovered) {
+                    comment.startOffset = recovered.start;
+                    comment.endOffset   = recovered.end;
+                    this.syncLineCoordsFromOffset(fileContent, comment);
+                    comment.isOrphaned = false;
+                    comment.anchorNeedsReview = recovered.kind === "loose" || recovered.score < 0.9;
                     changed = true;
                 }
                 continue;
@@ -308,17 +329,15 @@ export class CommentManager {
                 continue;
             }
 
-            // Slow-path: offset is stale (e.g. external sync) — re-search by hash.
-            const newPosition = this.resolveCommentPosition(fileContent, comment);
+            // Slow-path: offset is stale (e.g. external sync) — re-anchor by text + context.
+            const anchor = this.resolveAnchor(fileContent, comment);
 
-            if (newPosition) {
-                comment.startLine   = newPosition.line;
-                comment.startChar   = newPosition.startChar;
-                comment.endLine     = newPosition.line;
-                comment.endChar     = newPosition.endChar;
-                comment.startOffset = this.computeOffset(fileContent, newPosition.line, newPosition.startChar);
-                comment.endOffset   = comment.startOffset + comment.selectedText.length;
-                comment.isOrphaned  = false;
+            if (anchor) {
+                comment.startOffset = anchor.start;
+                comment.endOffset   = anchor.end;
+                this.syncLineCoordsFromOffset(fileContent, comment);
+                comment.isOrphaned = false;
+                comment.anchorNeedsReview = anchor.kind === "loose" || anchor.score < 0.9;
                 changed = true;
             } else {
                 comment.isOrphaned = true;
@@ -326,46 +345,6 @@ export class CommentManager {
             }
         }
         return changed;
-    }
-
-    // Recovers an orphaned comment by locating its exact selected text anywhere in the
-    // file. An exact string match already implies identical content; the hash check is
-    // defense-in-depth. When the text appears more than once, the occurrence closest to
-    // the comment's last-known offset wins, so nearby duplicates are preferred.
-    private recoverOrphanByExactText(fileContent: string, comment: Comment): boolean {
-        const text = comment.selectedText;
-        if (!text || text.length < this.MIN_TEXT_LENGTH) return false;
-
-        const hint = comment.startOffset ?? 0;
-        let bestStart = -1;
-        let bestDistance = Infinity;
-        for (let idx = fileContent.indexOf(text); idx !== -1; idx = fileContent.indexOf(text, idx + 1)) {
-            const distance = Math.abs(idx - hint);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestStart = idx;
-            }
-        }
-        if (bestStart === -1) return false;
-
-        const startOffset = bestStart;
-        const endOffset = bestStart + text.length;
-
-        if (comment.selectedTextHash &&
-            this.generateHash(fileContent.substring(startOffset, endOffset)) !== comment.selectedTextHash) {
-            return false;
-        }
-
-        const start = this.offsetToLineChar(fileContent, startOffset);
-        const end   = this.offsetToLineChar(fileContent, endOffset);
-        comment.startOffset = startOffset;
-        comment.endOffset   = endOffset;
-        comment.startLine   = start.line;
-        comment.startChar   = start.char;
-        comment.endLine     = end.line;
-        comment.endChar     = end.char;
-        comment.isOrphaned  = false;
-        return true;
     }
 
     private textAtOffsetMatches(fileContent: string, comment: Comment): boolean {
@@ -414,6 +393,33 @@ export class CommentManager {
         const line = lines[comment.startLine];
         if (comment.startChar < 0 || comment.endChar > line.length || comment.startChar > comment.endChar) return false;
         return line.slice(comment.startChar, comment.endChar) === comment.selectedText;
+    }
+
+    /**
+     * New comments carry context, so they are resolved with the tolerant anchor finder (which
+     * can follow a paragraph across the whole note). Comments created before that simply fall
+     * back to the old ±10-line hash search.
+     */
+    private resolveAnchor(
+        fileContent: string,
+        comment: Comment,
+    ): { start: number; end: number; score: number; kind: "exact" | "loose" } | null {
+        if (!comment.selectedText || comment.selectedText.length < this.MIN_TEXT_LENGTH) return null;
+
+        const match = findAnchor(fileContent, {
+            text: comment.selectedText,
+            prefix: comment.prefix,
+            suffix: comment.suffix,
+            hintOffset: comment.startOffset,
+        });
+        if (match) return { start: match.start, end: match.end, score: match.score, kind: match.kind };
+
+        if (comment.prefix || comment.suffix) return null;
+
+        const legacy = this.resolveCommentPosition(fileContent, comment);
+        if (!legacy) return null;
+        const start = this.computeOffset(fileContent, legacy.line, legacy.startChar);
+        return { start, end: start + comment.selectedText.length, score: 1, kind: "exact" };
     }
 
     private resolveCommentPosition(
