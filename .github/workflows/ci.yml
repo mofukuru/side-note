@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets the workflow be started by hand from the Actions tab, which matters on a fork where
+  # the very first run has to be enabled manually.
+  workflow_dispatch:
 
 jobs:
   build:
