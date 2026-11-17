@@ -99,6 +99,127 @@
     font-style: italic;
 }
 
+/* The note this comment belongs to could not be found (moved or deleted outside Obsidian) */
+.sidenote-comment-item.sidenote-link-missing {
+    border-left: 3px solid var(--text-error);
+}
+
+.sidenote-link-badge {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 0 6px;
+    border-radius: 4px;
+    font-size: 0.75em;
+    color: var(--text-on-accent);
+    background-color: var(--text-error);
+}
+
+/* Link repair modal */
+.sidenote-link-modal .sidenote-modal-footer {
+    /* Keep the footer reachable when the list is long. */
+    position: sticky;
+    bottom: 0;
+    padding: 12px 0 4px;
+    background-color: var(--background-primary);
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.sidenote-anchor-badge {
+    display: inline-block;
+    margin-left: 8px;
+    font-size: 0.75em;
+    color: var(--text-warning, #d69e2e);
+}
+
+.sidenote-link-hint {
+    color: var(--text-faint);
+    line-height: 1.4;
+}
+
+.sidenote-link-done {
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border-left: 3px solid var(--interactive-success, #4caf50);
+    background-color: var(--background-secondary);
+}
+
+.sidenote-link-done h3 {
+    margin: 0 0 6px;
+    font-size: 0.9em;
+}
+
+.sidenote-link-modal .sidenote-link-summary {
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+
+.sidenote-link-row {
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background-color: var(--background-secondary);
+}
+
+.sidenote-link-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 8px;
+}
+
+.sidenote-link-path {
+    font-family: var(--font-monospace);
+    word-break: break-all;
+}
+
+.sidenote-link-meta,
+.sidenote-link-target {
+    color: var(--text-muted);
+    font-size: 0.85em;
+}
+
+.sidenote-link-target {
+    display: block;
+    margin-top: 6px;
+    font-family: var(--font-monospace);
+}
+
+.sidenote-link-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.sidenote-link-bulk {
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border: 1px solid var(--interactive-accent);
+    border-radius: 8px;
+}
+
+.sidenote-link-bulk h3 {
+    margin: 0 0 8px;
+    font-size: 0.95em;
+}
+
+.sidenote-link-bulk-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.sidenote-link-bulk-text {
+    font-family: var(--font-monospace);
+    font-size: 0.85em;
+}
+
+.sidenote-link-suggestion-path {
+    display: block;
+    color: var(--text-muted);
+}
+
 /* Inline edit / add form */
 .sidenote-new-comment-form {
     margin-bottom: 12px;

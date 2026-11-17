@@ -16,6 +16,9 @@ interface PendingAdd {
     startChar: number;
     endLine: number;
     endChar: number;
+    /** Surrounding text captured at creation; used to re-find the quote after edits. */
+    prefix?: string;
+    suffix?: string;
 }
 
 export class SideNoteView extends ItemView {
@@ -152,6 +155,25 @@ export class SideNoteView extends ItemView {
             text: new Date(comment.timestamp).toLocaleString(),
             cls: "sidenote-timestamp",
         });
+
+        // Reported by the read-only link scan: the note this comment points at is gone.
+        if (this.plugin.isLinkMissing(comment.filePath)) {
+            commentEl.addClass("sidenote-link-missing");
+            const badge = textInfoEl.createEl("small", {
+                text: "Note not found",
+                cls: "sidenote-link-badge",
+            });
+            badge.setAttribute("aria-label", `No note at ${comment.filePath}`);
+        }
+
+        // The quote was found again, but not exactly: the highlight may be a little off.
+        if (comment.anchorNeedsReview && !comment.isOrphaned) {
+            const moved = textInfoEl.createEl("small", {
+                text: "Moved?",
+                cls: "sidenote-anchor-badge",
+            });
+            moved.setAttribute("aria-label", "The quoted text was re-found after an edit, but the match was not exact");
+        }
 
         // --- Single click: jump to editor (skipped in edit mode) ---
         commentEl.addEventListener('click', async (event) => {
@@ -493,6 +515,8 @@ export class SideNoteView extends ItemView {
                 endChar: info.endChar,
                 selectedText: info.selectedText,
                 selectedTextHash: info.selectedTextHash,
+                prefix: info.prefix,
+                suffix: info.suffix,
                 comment: text,
                 timestamp: Date.now(),
                 isOrphaned: false,

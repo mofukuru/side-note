@@ -1,4 +1,5 @@
 import type { CommentColor } from "./types";
+import { findAnchor } from "./core/anchorResolver";
 
 export interface Comment {
     id: string;
@@ -14,10 +15,25 @@ export interface Comment {
     endOffset?: number;
     selectedText: string;
     selectedTextHash: string;
+    /**
+     * Up to 32 characters before/after the selection when the comment was created. They are
+     * what makes a moved paragraph findable after an edit (see core/anchorResolver.ts).
+     */
+    prefix?: string;
+    suffix?: string;
+    /** True when the anchor was recovered, but with less certainty than an exact match. */
+    anchorNeedsReview?: boolean;
     comment: string;
     timestamp: number;
     isOrphaned?: boolean;
     isNoteComment?: boolean;
+    /**
+     * SHA-256 of the note content when the comment was created or last re-linked. Absent for
+     * comments older than this feature; used as the strongest clue when a note is renamed.
+     */
+    fileHashAtAttach?: string;
+    /** Byte length at attach time; cheap prefilter for content matching after a rename. */
+    fileSizeAtAttach?: number;
     commentPath?: string;
     resolved?: boolean;
     resolvedAt?: number | null;
@@ -308,17 +324,15 @@ export class CommentManager {
                 continue;
             }
 
-            // Slow-path: offset is stale (e.g. external sync) — re-search by hash.
-            const newPosition = this.resolveCommentPosition(fileContent, comment);
+            // Slow-path: offset is stale (e.g. external sync) — re-anchor by text + context.
+            const anchor = this.resolveAnchor(fileContent, comment);
 
-            if (newPosition) {
-                comment.startLine   = newPosition.line;
-                comment.startChar   = newPosition.startChar;
-                comment.endLine     = newPosition.line;
-                comment.endChar     = newPosition.endChar;
-                comment.startOffset = this.computeOffset(fileContent, newPosition.line, newPosition.startChar);
-                comment.endOffset   = comment.startOffset + comment.selectedText.length;
-                comment.isOrphaned  = false;
+            if (anchor) {
+                comment.startOffset = anchor.start;
+                comment.endOffset   = anchor.end;
+                this.syncLineCoordsFromOffset(fileContent, comment);
+                comment.isOrphaned = false;
+                comment.anchorNeedsReview = anchor.kind === "loose" || anchor.score < 0.9;
                 changed = true;
             } else {
                 comment.isOrphaned = true;
@@ -414,6 +428,33 @@ export class CommentManager {
         const line = lines[comment.startLine];
         if (comment.startChar < 0 || comment.endChar > line.length || comment.startChar > comment.endChar) return false;
         return line.slice(comment.startChar, comment.endChar) === comment.selectedText;
+    }
+
+    /**
+     * New comments carry context, so they are resolved with the tolerant anchor finder (which
+     * can follow a paragraph across the whole note). Comments created before that simply fall
+     * back to the old ±10-line hash search.
+     */
+    private resolveAnchor(
+        fileContent: string,
+        comment: Comment,
+    ): { start: number; end: number; score: number; kind: "exact" | "loose" } | null {
+        if (!comment.selectedText || comment.selectedText.length < this.MIN_TEXT_LENGTH) return null;
+
+        const match = findAnchor(fileContent, {
+            text: comment.selectedText,
+            prefix: comment.prefix,
+            suffix: comment.suffix,
+            hintOffset: comment.startOffset,
+        });
+        if (match) return { start: match.start, end: match.end, score: match.score, kind: match.kind };
+
+        if (comment.prefix || comment.suffix) return null;
+
+        const legacy = this.resolveCommentPosition(fileContent, comment);
+        if (!legacy) return null;
+        const start = this.computeOffset(fileContent, legacy.line, legacy.startChar);
+        return { start, end: start + comment.selectedText.length, score: 1, kind: "exact" };
     }
 
     private resolveCommentPosition(

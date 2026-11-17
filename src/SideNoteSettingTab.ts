@@ -81,6 +81,30 @@ export class SideNoteSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
+            .setName("Re-link comments automatically")
+            .setDesc("When a note is moved and exactly one candidate matches by content hash or by the quoted text, update the comment's link without asking. Ambiguous cases still wait for you.")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.autoRelink)
+                    .onChange(async (value: boolean) => {
+                        this.plugin.settings.autoRelink = value;
+                        await this.plugin.saveData();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Re-link after a rename too")
+            .setDesc("On by default: when a note is renamed outside Obsidian and its content still matches exactly, the link follows it without asking. Turn this off if you would rather confirm every rename by hand, or if several devices share this vault.")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.autoRelinkRenames)
+                    .onChange(async (value: boolean) => {
+                        this.plugin.settings.autoRelinkRenames = value;
+                        await this.plugin.saveData();
+                    })
+            );
+
+        new Setting(containerEl)
             .setName("Highlight color")
             .setDesc("Choose the color for highlighted comments in the editor")
             .addColorPicker((colorPicker) =>
@@ -169,6 +193,39 @@ export class SideNoteSettingTab extends PluginSettingTab {
                         this.display();
                     })
                     .setDisabled(orphanedCount === 0)
+            );
+
+        // A different failure from "orphaned": the note itself is gone, so there is no text
+        // to search for. Reported only; repairing links comes in a later step.
+        const missingLinkCount = this.plugin.getMissingLinkCount();
+        const lastScanAt = this.plugin.getLastLinkScanAt();
+        const lastScanText = lastScanAt
+            ? ` Last scan: ${new Date(lastScanAt).toLocaleTimeString()}.`
+            : " Not scanned yet.";
+
+        new Setting(containerEl)
+            .setName("Unattached comments")
+            .setDesc(missingLinkCount === 0
+                ? `No comment points at a missing note.${lastScanText}`
+                : `${missingLinkCount} comment(s) point at a note that no longer exists. ` +
+                  `This happens when a note is moved or deleted outside Obsidian. ` +
+                  `Repairing them is not implemented yet — this is a read-only report.${lastScanText}`)
+            .addButton((button) =>
+                button
+                    .setButtonText("Rescan")
+                    .onClick(async () => {
+                        await this.plugin.scanCommentLinks(true);
+                        this.display();
+                    })
+            )
+            .addButton((button) =>
+                button
+                    .setButtonText("Review and repair…")
+                    .setCta()
+                    .onClick(async () => {
+                        await this.plugin.openCommentLinkRepairModal();
+                        this.display();
+                    })
             );
     }
 

@@ -5,6 +5,12 @@ import { SideNoteView } from "./SideNoteView";
 import { SideNoteSettingTab } from "./SideNoteSettingTab";
 import { createHighlightPlugin, forceUpdateEffect, EditorWithCM } from "./highlightPlugin";
 import { switchToSideNoteView, generateHash, generateCommentId } from "./utils";
+import { resolveCommentLinks, planAutomaticRepairs } from "./core/noteLinkResolver";
+import type { LinkReport, ResolverDeps } from "./core/noteLinkResolver";
+import { applyRelink, backupFileName, formatAuditRecord, setAttachHash } from "./core/linkRepairOps";
+import type { AuditRecord, RelinkRepair } from "./core/linkRepairOps";
+import { CommentLinkModal } from "./CommentLinkModal";
+import { captureContext } from "./core/anchorResolver";
 import { DEFAULT_SETTINGS } from "./types";
 import type { CommentColor, PluginData, SideNoteSettings } from "./types";
 
@@ -24,6 +30,21 @@ export default class SideNote extends Plugin {
     private isSavingData = false;
     // Avoid overlapping reloads from the timer and vault modify event.
     private isReloadingData = false;
+
+    // --- Comment link reconciliation (read-only stage) ---
+    // `Comment.filePath` is only updated by the vault rename event, which Obsidian does not
+    // emit when another program moves a note. Such comments stay listed but point at a path
+    // that no longer exists. This stage only reports them; it writes nothing.
+    // See docs/design-comment-link-recovery.md.
+    private linkScanTimer: number | null = null;
+    private isScanningLinks = false;
+    private isApplyingRepairs = false;
+    private missingLinkPaths = new Set<string>();
+    private lastLinkScanAt = 0;
+    // Give the vault index time to settle after start-up before the first scan.
+    private readonly linkScanInitialDelayMs = 10 * 1000;
+    private readonly linkScanIntervalMs = 3 * 60 * 1000;
+    private readonly linkScanDebounceMs = 1500;
 
     private registerFreshSettingTab(): void {
         const appWithSettings = this.app as App & {
@@ -84,6 +105,12 @@ export default class SideNote extends Plugin {
 
     async onload() {
         await this.loadPluginData();
+
+        // Diagnostic: record which bundle is actually running. Without this there is no way to
+        // tell from the outside whether a reload picked up the freshly built main.js.
+        void this.writeBuildMarker();
+        // Keep the plugin folder tidy even if no repair happens during this session.
+        void this.pruneOldBackups();
 
         this.commentManager = new CommentManager(this.comments);
         this.applyHighlightColor();
@@ -152,6 +179,18 @@ export default class SideNote extends Plugin {
             },
         });
 
+        this.addCommand({
+            id: "scan-comment-links",
+            name: "Scan for unattached comments",
+            callback: () => { void this.scanCommentLinks(true); },
+        });
+
+        this.addCommand({
+            id: "scan-and-repair-comment-links",
+            name: "Scan and repair comment links",
+            callback: () => { void this.openCommentLinkRepairModal(); },
+        });
+
         this.registerEvent(
             this.app.workspace.on('editor-menu', (menu, editor, view) => {
                 if (editor.somethingSelected()) {
@@ -189,6 +228,17 @@ export default class SideNote extends Plugin {
             window.setInterval(() => {
                 void this.reloadDataFromDisk();
             }, this.dataReloadIntervalMs)
+        );
+
+        // The scan is the safety net, not the events: a note moved while Obsidian was closed
+        // can never produce an event, so correctness must not depend on receiving one.
+        this.app.workspace.onLayoutReady(() => {
+            this.scheduleLinkScan(this.linkScanInitialDelayMs);
+        });
+        this.registerInterval(
+            window.setInterval(() => {
+                void this.scanCommentLinks();
+            }, this.linkScanIntervalMs)
         );
 
         this.registerEvent(
@@ -254,6 +304,14 @@ export default class SideNote extends Plugin {
             })
         );
 
+        // Accelerators only: they shorten the delay before the next scan, they never decide.
+        this.registerEvent(this.app.vault.on('delete', (file) => {
+            if (file instanceof TFile && file.extension === 'md') this.scheduleLinkScan();
+        }));
+        this.registerEvent(this.app.vault.on('create', (file) => {
+            if (file instanceof TFile && file.extension === 'md') this.scheduleLinkScan();
+        }));
+
         // Note: no editor-change handler here. The highlight plugin tracks positions via
         // ChangeSet.mapPos() (OT-style) in its own update() method, so periodic
         // forceUpdateEffect dispatches from editor-change are not needed and would reset
@@ -265,6 +323,350 @@ export default class SideNote extends Plugin {
         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
             if (leaf.view instanceof SideNoteView) leaf.view.highlightComment(commentId);
         });
+    }
+
+    private createResolverDeps(): ResolverDeps {
+        return {
+            listNotes: () => this.app.vault.getMarkdownFiles().map(file => file.path),
+            readNote: async (path: string) => {
+                const file = this.app.vault.getAbstractFileByPath(path);
+                if (!(file instanceof TFile)) return null;
+                try {
+                    return await this.app.vault.cachedRead(file);
+                } catch {
+                    return null;
+                }
+            },
+            hashText: (text: string) => generateHash(text),
+            sizeOf: (path: string) => {
+                const file = this.app.vault.getAbstractFileByPath(path);
+                return file instanceof TFile ? file.stat.size : null;
+            },
+            // Ask the file system, not the index: a watcher miss would otherwise hide a moved note.
+            exists: (path: string) => this.app.vault.adapter.exists(path),
+        };
+    }
+
+    /**
+     * Works out which comments point at a note that no longer exists. The result is kept in
+     * memory; writes only happen for repairs whose evidence is conclusive (autoRelink).
+     */
+    async scanCommentLinks(notify = false): Promise<LinkReport | null> {
+        if (this.isScanningLinks) return null;
+        this.isScanningLinks = true;
+        try {
+            let report = await this.resolveLinkReport();
+
+            // Only conclusive evidence is applied without asking: a unique content-hash match
+            // or a unique quoted-text match. A rename (different file name) is asked for unless
+            // the user opted in, because it rewrites the link to a differently named note.
+            const plan = this.settings.autoRelink
+                ? planAutomaticRepairs(report, { includeRenames: this.settings.autoRelinkRenames })
+                : [];
+            if (plan.length) {
+                const applied = await this.applyRepairsInternal(plan);
+                if (applied) {
+                    new Notice(`SideNote: automatically re-linked ${applied} comment(s).`);
+                    report = await this.resolveLinkReport();
+                }
+            }
+
+            this.missingLinkPaths = new Set(report.missing.map(result => result.path));
+            this.lastLinkScanAt = Date.now();
+            this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                if (leaf.view instanceof SideNoteView) leaf.view.renderComments();
+            });
+            if (notify) this.notifyLinkScanResult(report);
+            return report;
+        } catch (error) {
+            console.error("SideNote: comment link scan failed", error);
+            return null;
+        } finally {
+            this.isScanningLinks = false;
+        }
+    }
+
+    private resolveLinkReport(): Promise<LinkReport> {
+        return resolveCommentLinks(this.comments, this.createResolverDeps());
+    }
+
+    private notifyLinkScanResult(report: LinkReport): void {
+        if (!report.missing.length) {
+            new Notice("SideNote: every comment is linked to an existing note.");
+            return;
+        }
+        const missingComments = this.getMissingLinkCount();
+        new Notice(`SideNote: ${missingComments} comment(s) point at ${report.missing.length} missing note(s).`);
+    }
+
+    private scheduleLinkScan(delayMs = this.linkScanDebounceMs): void {
+        if (this.linkScanTimer !== null) window.clearTimeout(this.linkScanTimer);
+        this.linkScanTimer = window.setTimeout(() => {
+            this.linkScanTimer = null;
+            void this.scanCommentLinks();
+        }, delayMs);
+    }
+
+    /** True when the note this comment points at could not be found. */
+    isLinkMissing(filePath: string): boolean {
+        return this.missingLinkPaths.has(filePath);
+    }
+
+    getMissingLinkCount(): number {
+        if (!this.missingLinkPaths.size) return 0;
+        return this.commentManager.getComments().filter(c => this.missingLinkPaths.has(c.filePath)).length;
+    }
+
+    getMissingLinkPaths(): string[] {
+        return Array.from(this.missingLinkPaths);
+    }
+
+    getLastLinkScanAt(): number {
+        return this.lastLinkScanAt;
+    }
+
+    /** Scan, then let the user pick new targets for the comments that lost their note. */
+    async openCommentLinkRepairModal(): Promise<void> {
+        const report = await this.scanCommentLinks();
+        if (!report) return;
+        if (!report.missing.length) {
+            new Notice("SideNote: every comment is linked to an existing note.");
+            return;
+        }
+        new CommentLinkModal(this.app, report, {
+            onApply: (repairs: RelinkRepair[]) => this.applyLinkRepairs(repairs),
+            onDeleteComments: (commentIds: string[]) => this.deleteCommentsByIds(commentIds),
+        }).open();
+    }
+
+    /** Deletes comments that can no longer belong to anything; backs up first. */
+    private async deleteCommentsByIds(commentIds: string[]): Promise<number> {
+        if (!commentIds.length) return 0;
+        const backup = await this.backupDataBeforeRepair();
+        if (!backup) {
+            new Notice("SideNote: could not write a backup, so nothing was deleted.");
+            return 0;
+        }
+
+        const targets = new Set(commentIds);
+        const before = this.comments.length;
+        for (let i = this.comments.length - 1; i >= 0; i--) {
+            if (targets.has(this.comments[i].id)) this.comments.splice(i, 1);
+        }
+        const removed = before - this.comments.length;
+        if (!removed) return 0;
+
+        this.commentManager.updateComments(this.comments);
+        await this.saveData();
+        await this.scanCommentLinks();
+        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+            if (leaf.view instanceof SideNoteView) leaf.view.renderComments();
+        });
+        this.refreshEditorDecorations();
+        return removed;
+    }
+
+    /**
+     * Applies confirmed re-links. Writes only `filePath` (and the derived `commentPath`):
+     * ids, quoted text, anchors and bodies are left exactly as they were.
+     */
+    async applyLinkRepairs(repairs: RelinkRepair[]): Promise<number> {
+        const applied = await this.applyRepairsInternal(repairs);
+        if (!applied) return 0;
+        await this.scanCommentLinks();
+        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+            if (leaf.view instanceof SideNoteView) leaf.view.renderComments();
+        });
+        this.refreshEditorDecorations();
+        return applied;
+    }
+
+    /** Backup → rewrite filePath → re-hash → save → read back → audit. No rescan here. */
+    private async applyRepairsInternal(repairs: RelinkRepair[]): Promise<number> {
+        if (!repairs.length || this.isApplyingRepairs) return 0;
+
+        this.isApplyingRepairs = true;
+        try {
+            // A repair without a backup must not happen at all.
+            const backup = await this.backupDataBeforeRepair();
+            if (!backup) {
+                new Notice("SideNote: could not write a backup, so nothing was changed.");
+                return 0;
+            }
+
+            // Mutate the array that saveData() persists. The comment manager can hold a
+            // different array after a data reload, so writing through it would silently
+            // update an array nobody saves.
+            const comments = this.comments;
+            const records: AuditRecord[] = [];
+            let applied = 0;
+
+            for (const repair of repairs) {
+                const result = applyRelink(
+                    comments,
+                    repair.from,
+                    repair.to,
+                    notePath => this.getSideNoteFilePath(notePath),
+                );
+                if (!result.changed) continue;
+                applied += result.changed;
+                records.push({
+                    at: new Date().toISOString(),
+                    from: repair.from,
+                    to: repair.to,
+                    evidence: repair.evidence,
+                    commentIds: result.affectedIds,
+                    backup,
+                });
+            }
+
+            if (!applied) return 0;
+
+            console.info(
+                "SideNote: repairing links",
+                { comments: applied, sharedArray: this.comments === this.commentManager.getComments() },
+            );
+
+            // Re-hash the note each comment now points at, so a later rename can be matched
+            // by content instead of by file name (evidence tier S2).
+            await this.refreshAttachHashes(repairs.map(repair => repair.to));
+
+            this.commentManager.updateComments(this.comments);
+            await this.saveData();
+
+            const saved = await this.dataFileContainsEvery(repairs.map(repair => repair.to));
+            if (!saved) {
+                console.error("SideNote: repair was applied in memory but data.json does not contain the new paths");
+                new Notice("SideNote: the repair did not reach data.json. Check the console.");
+                return 0;
+            }
+
+            await this.appendLinkAudit(records);
+            return applied;
+        } finally {
+            this.isApplyingRepairs = false;
+        }
+    }
+
+    /**
+     * Keeps only the most recent timestamped backups. Only files this plugin created with the
+     * `data.v1-backup-<stamp>.json` pattern are touched: `data.json` and the hand-made
+     * `data.v1-backup.json` are never candidates for deletion.
+     */
+    private async pruneOldBackups(keep = 5): Promise<void> {
+        try {
+            const adapter = this.app.vault.adapter;
+            const folder = this.pluginFolder();
+            const listing = await adapter.list(folder);
+            const backups = listing.files
+                .filter(file => /data\.v1-backup-\d{8}-\d{6}\.json$/.test(file))
+                .sort();
+            const excess = backups.slice(0, Math.max(0, backups.length - keep));
+            for (const file of excess) {
+                await adapter.remove(file);
+                console.info("SideNote: pruned old backup", file);
+            }
+        } catch (error) {
+            console.warn("SideNote: could not prune old backups", error);
+        }
+    }
+
+    private async refreshAttachHashes(paths: string[]): Promise<void> {        for (const path of new Set(paths)) {
+            const file = this.app.vault.getAbstractFileByPath(path);
+            if (!(file instanceof TFile)) continue;
+            try {
+                const content = await this.app.vault.cachedRead(file);
+                setAttachHash(this.comments, path, await generateHash(content), new TextEncoder().encode(content).length);
+            } catch (error) {
+                // The hash is a matching aid, never a reason to fail a repair.
+                console.warn("SideNote: could not record the note hash", path, error);
+            }
+        }
+    }
+
+    /** Reads data.json back and checks the repaired paths actually landed there. */
+    private async dataFileContainsEvery(paths: string[]): Promise<boolean> {
+        const target = `${this.pluginFolder()}/data.json`;
+        try {
+            const raw = await this.app.vault.adapter.read(target);
+            const data = JSON.parse(raw) as { comments?: Array<{ filePath?: string }> };
+            const stored = new Set((data.comments ?? []).map(comment => comment.filePath));
+            return paths.every(path => stored.has(path));
+        } catch (error) {
+            console.error("SideNote: could not verify data.json after repair", error);
+            return false;
+        }
+    }
+
+    /** Where this plugin's own files live; manifest.dir is not always populated. */
+    private pluginFolder(): string {
+        if (this.manifest.dir) return this.manifest.dir;
+        const configDir = this.app.vault.configDir || ".obsidian";
+        return `${configDir}/plugins/${this.manifest.id}`;
+    }
+
+    /**
+     * Writes the SHA-256 of the running bundle plus a timestamp, so a stale reload is visible
+     * from disk instead of being guessed from behaviour.
+     */
+    private async writeBuildMarker(): Promise<void> {
+        try {
+            const folder = this.pluginFolder();
+            const adapter = this.app.vault.adapter;
+            const source = await adapter.read(`${folder}/main.js`);
+            const marker = {
+                loadedAt: new Date().toISOString(),
+                version: this.manifest.version,
+                mainJsSha256: await generateHash(source),
+                autoRelink: this.settings.autoRelink,
+            };
+            await adapter.write(`${folder}/build-marker.json`, JSON.stringify(marker, null, 2));
+        } catch (error) {
+            console.warn("SideNote: could not write the build marker", error);
+        }
+    }
+
+    /** Copies data.json beside itself before the first write of a repair batch. */
+    private async backupDataBeforeRepair(): Promise<string | null> {
+        const target = `${this.pluginFolder()}/${backupFileName(new Date())}`;
+        try {
+            const snapshot = JSON.stringify({ ...this.settings, comments: this.comments }, null, 2);
+            await this.app.vault.adapter.write(target, snapshot);
+            if (!(await this.app.vault.adapter.exists(target))) {
+                console.error("SideNote: backup write reported success but the file is missing", target);
+                return null;
+            }
+            console.info("SideNote: backed up data.json to", target);
+            await this.pruneOldBackups();
+            return target;
+        } catch (error) {
+            console.error("SideNote: could not back up data.json before repair", error);
+            return null;
+        }
+    }
+
+    private async appendLinkAudit(records: AuditRecord[]): Promise<void> {
+        if (!records.length) return;
+        const target = `${this.pluginFolder()}/link-repair.log`;
+        const text = records.map(record => formatAuditRecord(record)).join("\n") + "\n";
+        try {
+            // Read + write instead of adapter.append(): append fails when the log file does
+            // not exist yet, and silently losing the audit trail is worse than a full rewrite.
+            const adapter = this.app.vault.adapter;
+            const existing = (await adapter.exists(target)) ? await adapter.read(target) : "";
+            await adapter.write(target, existing + text);
+            console.info("SideNote: appended link repair audit", target);
+        } catch (error) {
+            console.error("SideNote: could not write the link repair log", error);
+            new Notice("SideNote: repaired, but the audit log could not be written.");
+        }
+    }
+
+    onunload() {
+        if (this.linkScanTimer !== null) {
+            window.clearTimeout(this.linkScanTimer);
+            this.linkScanTimer = null;
+        }
     }
 
     async activateView() {
@@ -333,8 +735,24 @@ export default class SideNote extends Plugin {
             return;
         }
         this.lastAddFingerprint = { key: fingerprint, at: now };
+        await this.recordAttachHash(newComment);
         this.commentManager.addComment(newComment);
         await this.onCommentsChanged(message);
+    }
+
+    /** Stamps the note's content hash onto a new comment (used later to recognise renames). */
+    private async recordAttachHash(comment: Comment): Promise<void> {
+        const file = this.app.vault.getAbstractFileByPath(comment.filePath);
+        if (!(file instanceof TFile)) return;
+        try {
+            const content = await this.app.vault.cachedRead(file);
+            comment.fileHashAtAttach = await generateHash(content);
+            // Byte length, matching TFile.stat.size: character count differs for non-ASCII text
+            // (a two-character Chinese word is 6 bytes), which would break the size prefilter.
+            comment.fileSizeAtAttach = new TextEncoder().encode(content).length;
+        } catch (error) {
+            console.warn("SideNote: could not record the note hash for a new comment", error);
+        }
     }
 
     async editComment(commentId: string, newCommentText: string) {
@@ -373,6 +791,16 @@ export default class SideNote extends Plugin {
         if (!selection?.trim() || !filePath) return null;
         const cursorStart = editor.getCursor("from");
         const cursorEnd = editor.getCursor("to");
+
+        // Record a little of the surrounding text: it is what lets a moved paragraph be found
+        // again after the note is edited (see core/anchorResolver.ts).
+        const doc = editor.getValue();
+        const lines = doc.split("\n");
+        let offset = 0;
+        for (let i = 0; i < cursorStart.line && i < lines.length; i++) offset += lines[i].length + 1;
+        offset += cursorStart.ch;
+        const { prefix, suffix } = captureContext(doc, offset, offset + selection.length);
+
         return {
             filePath,
             isNoteComment: false,
@@ -382,6 +810,8 @@ export default class SideNote extends Plugin {
             startChar: cursorStart.ch,
             endLine: cursorEnd.line,
             endChar: cursorEnd.ch,
+            prefix,
+            suffix,
         };
     }
 
@@ -442,7 +872,7 @@ export default class SideNote extends Plugin {
     private async reloadDataFromDisk(): Promise<boolean> {
         // Skip reloads while saving or while another reload is in progress so
         // SideNote does not race with itself.
-        if (this.isSavingData || this.isReloadingData) return false;
+        if (this.isSavingData || this.isReloadingData || this.isApplyingRepairs) return false;
 
         this.isReloadingData = true;
         try {
@@ -477,6 +907,8 @@ export default class SideNote extends Plugin {
             highlightStyle: loadedData.highlightStyle || DEFAULT_SETTINGS.highlightStyle,
             showResolvedComments: loadedData.showResolvedComments !== undefined ? loadedData.showResolvedComments : DEFAULT_SETTINGS.showResolvedComments,
             allowEmptyComments: loadedData.allowEmptyComments !== undefined ? loadedData.allowEmptyComments : DEFAULT_SETTINGS.allowEmptyComments,
+            autoRelink: loadedData.autoRelink !== undefined ? loadedData.autoRelink : DEFAULT_SETTINGS.autoRelink,
+            autoRelinkRenames: loadedData.autoRelinkRenames !== undefined ? loadedData.autoRelinkRenames : DEFAULT_SETTINGS.autoRelinkRenames,
         };
         this.comments = loadedData.comments || [];
         if (this.commentManager) this.applyHighlightColor();
