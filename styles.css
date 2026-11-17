@@ -161,6 +161,10 @@
     background-color: var(--background-secondary);
 }
 
+.sidenote-link-row.sidenote-link-suspect {
+    border-left: 3px solid var(--text-warning, #d69e2e);
+}
+
 .sidenote-link-head {
     display: flex;
     flex-direction: column;

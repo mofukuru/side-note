@@ -6,7 +6,7 @@ import { SideNoteSettingTab } from "./SideNoteSettingTab";
 import { createHighlightPlugin, forceUpdateEffect, EditorWithCM } from "./highlightPlugin";
 import { switchToSideNoteView, generateHash, generateCommentId } from "./utils";
 import { resolveCommentLinks, planAutomaticRepairs } from "./core/noteLinkResolver";
-import type { LinkReport, ResolverDeps } from "./core/noteLinkResolver";
+import type { LinkReport, ResolveOptions, ResolverDeps } from "./core/noteLinkResolver";
 import { applyRelink, backupFileName, formatAuditRecord, setAttachHash } from "./core/linkRepairOps";
 import type { AuditRecord, RelinkRepair } from "./core/linkRepairOps";
 import { CommentLinkModal } from "./CommentLinkModal";
@@ -179,7 +179,9 @@ export default class SideNote extends Plugin {
         this.addCommand({
             id: "scan-comment-links",
             name: "Scan for unattached comments",
-            callback: () => { void this.scanCommentLinks(true); },
+            // Explicitly read-only: it reports, it never repairs, even when automatic
+            // re-linking is enabled. The repair command and the background scan do the writing.
+            callback: () => { void this.scanCommentLinks(true, { autoApply: false }); },
         });
 
         this.addCommand({
@@ -348,7 +350,7 @@ export default class SideNote extends Plugin {
      * Works out which comments point at a note that no longer exists. The result is kept in
      * memory; writes only happen for repairs whose evidence is conclusive (autoRelink).
      */
-    async scanCommentLinks(notify = false): Promise<LinkReport | null> {
+    async scanCommentLinks(notify = false, options: { autoApply?: boolean } = {}): Promise<LinkReport | null> {
         if (this.isScanningLinks) return null;
         this.isScanningLinks = true;
         try {
@@ -357,7 +359,8 @@ export default class SideNote extends Plugin {
             // Only conclusive evidence is applied without asking: a unique content-hash match
             // or a unique quoted-text match. A rename (different file name) is asked for unless
             // the user opted in, because it rewrites the link to a differently named note.
-            const plan = this.settings.autoRelink
+            const autoApply = options.autoApply ?? true;
+            const plan = autoApply && this.settings.autoRelink
                 ? planAutomaticRepairs(report, { includeRenames: this.settings.autoRelinkRenames })
                 : [];
             if (plan.length) {
@@ -383,8 +386,8 @@ export default class SideNote extends Plugin {
         }
     }
 
-    private resolveLinkReport(): Promise<LinkReport> {
-        return resolveCommentLinks(this.comments, this.createResolverDeps());
+    private resolveLinkReport(options: ResolveOptions = {}): Promise<LinkReport> {
+        return resolveCommentLinks(this.comments, this.createResolverDeps(), options);
     }
 
     private notifyLinkScanResult(report: LinkReport): void {
@@ -424,9 +427,10 @@ export default class SideNote extends Plugin {
 
     /** Scan, then let the user pick new targets for the comments that lost their note. */
     async openCommentLinkRepairModal(): Promise<void> {
-        const report = await this.scanCommentLinks();
-        if (!report) return;
-        if (!report.missing.length) {
+        // The review command also checks paths that still exist: a note can be replaced at the
+        // same path, which the periodic scan deliberately does not pay for.
+        const report = await this.resolveLinkReport({ checkReplacedPaths: true });
+        if (!report.missing.length && !report.suspects.length) {
             new Notice("SideNote: every comment is linked to an existing note.");
             return;
         }
@@ -528,12 +532,22 @@ export default class SideNote extends Plugin {
             // by content instead of by file name (evidence tier S2).
             await this.refreshAttachHashes(repairs.map(repair => repair.to));
 
+            // The note may have been edited while it was moved. Recompute the anchors now,
+            // otherwise a comment can look healthy until its note happens to be opened.
+            await this.refreshAnchors(repairs.map(repair => repair.to));
+
             this.commentManager.updateComments(this.comments);
             await this.saveData();
 
-            const saved = await this.dataFileContainsEvery(repairs.map(repair => repair.to));
+            // Verify per comment, not per path: a path-level check would pass when the file
+            // exists but the comment that was supposed to move there did not.
+            const expected = new Map<string, string>();
+            for (const record of records) {
+                for (const id of record.commentIds) expected.set(id, record.to);
+            }
+            const saved = await this.dataFileMatches(expected);
             if (!saved) {
-                console.error("SideNote: repair was applied in memory but data.json does not contain the new paths");
+                console.error("SideNote: repair was applied in memory but data.json does not match");
                 new Notice("SideNote: the repair did not reach data.json. Check the console.");
                 return 0;
             }
@@ -568,6 +582,20 @@ export default class SideNote extends Plugin {
         }
     }
 
+    /** Re-resolves anchors for the notes that were just re-linked. */
+    private async refreshAnchors(paths: string[]): Promise<void> {
+        for (const path of new Set(paths)) {
+            const file = this.app.vault.getAbstractFileByPath(path);
+            if (!(file instanceof TFile)) continue;
+            try {
+                const content = await this.app.vault.read(file);
+                this.commentManager.updateCommentCoordinatesForFile(content, path);
+            } catch (error) {
+                console.warn("SideNote: could not refresh anchors after a repair", path, error);
+            }
+        }
+    }
+
     private async refreshAttachHashes(paths: string[]): Promise<void> {        for (const path of new Set(paths)) {
             const file = this.app.vault.getAbstractFileByPath(path);
             if (!(file instanceof TFile)) continue;
@@ -581,14 +609,21 @@ export default class SideNote extends Plugin {
         }
     }
 
-    /** Reads data.json back and checks the repaired paths actually landed there. */
-    private async dataFileContainsEvery(paths: string[]): Promise<boolean> {
+    /** Reads data.json back and checks every comment landed on the path it was moved to. */
+    private async dataFileMatches(expected: Map<string, string>): Promise<boolean> {
+        if (!expected.size) return true;
         const target = `${this.pluginFolder()}/data.json`;
         try {
             const raw = await this.app.vault.adapter.read(target);
-            const data = JSON.parse(raw) as { comments?: Array<{ filePath?: string }> };
-            const stored = new Set((data.comments ?? []).map(comment => comment.filePath));
-            return paths.every(path => stored.has(path));
+            const data = JSON.parse(raw) as { comments?: Array<{ id?: string; filePath?: string }> };
+            const stored = new Map((data.comments ?? []).map(comment => [comment.id, comment.filePath]));
+            for (const [id, path] of expected) {
+                if (stored.get(id) !== path) {
+                    console.error("SideNote: comment did not reach its new path", { id, expected: path, actual: stored.get(id) });
+                    return false;
+                }
+            }
+            return true;
         } catch (error) {
             console.error("SideNote: could not verify data.json after repair", error);
             return false;

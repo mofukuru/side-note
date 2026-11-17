@@ -124,8 +124,9 @@ export class CommentLinkModal extends Modal {
         contentEl.createEl("h2", { text: "Unattached comments" });
 
         const pending = this.report.missing.filter(result => !this.done.has(result.path));
+        const suspects = (this.report.suspects ?? []).filter(result => !this.done.has(result.path));
 
-        if (!pending.length && !this.done.size) {
+        if (!pending.length && !suspects.length && !this.done.size) {
             contentEl.createEl("p", { text: "Nothing to review: every comment is linked to an existing note." });
             this.renderFooter();
             return;
@@ -150,6 +151,17 @@ export class CommentLinkModal extends Modal {
             const visible = new Set(pending.map(result => result.path));
             if (this.report.bulk.length) this.renderBulk(visible);
             pending.forEach(result => this.renderRow(result));
+        }
+
+        if (suspects.length) {
+            const linkedCount = suspects.reduce((sum, result) => sum + result.commentIds.length, 0);
+            contentEl.createEl("p", {
+                text: `${linkedCount} comment(s) point at a note that still exists but no longer contains ` +
+                    "the quoted text, and whose content differs from when the comment was written — " +
+                    "the path may have been reused by another note.",
+                cls: "sidenote-link-summary",
+            });
+            suspects.forEach(result => this.renderRow(result, true));
         }
 
         this.renderFooter();
@@ -177,15 +189,26 @@ export class CommentLinkModal extends Modal {
         });
     }
 
-    private renderRow(result: FileLinkResult): void {
-        const row = this.contentEl.createDiv("sidenote-link-row");
+    private renderRow(result: FileLinkResult, suspect = false): void {
+        const row = this.contentEl.createDiv(suspect ? "sidenote-link-row sidenote-link-suspect" : "sidenote-link-row");
 
         const head = row.createDiv("sidenote-link-head");
         head.createDiv({ text: result.path, cls: "sidenote-link-path" });
         head.createEl("small", {
-            text: `${result.commentIds.length} comment(s) · ${evidenceLabel(result.evidence)}`,
+            text: suspect
+                ? `${result.commentIds.length} comment(s) · the note at this path was replaced`
+                : `${result.commentIds.length} comment(s) · ${evidenceLabel(result.evidence)}`,
             cls: "sidenote-link-meta",
         });
+        if (suspect) {
+            head.createEl("small", {
+                text: result.candidates.length
+                    ? "The quoted text is gone, but content matching the original note was found elsewhere."
+                    : "The quoted text is gone and the original content was not found anywhere. " +
+                      "Pick the right note, or delete the comments.",
+                cls: "sidenote-link-hint",
+            });
+        }
         if (result.evidence === "S7") {
             head.createEl("small", {
                 text: "This note no longer exists, so there is nothing to match against. " +

@@ -306,12 +306,17 @@ export class CommentManager {
                     changed = true;
                     continue;
                 }
-                // Last resort: the selected text may still exist elsewhere in the file.
-                // When a comment is orphaned its offset/coords are collapsed to a single
-                // point, so the two fast paths above cannot find it even though the text
-                // is still present. Search the whole document for the exact text and
-                // recover the comment if a match is found.
-                if (this.recoverOrphanByExactText(fileContent, comment)) {
+                // Last resort: the selected text may still exist elsewhere in the file. When a
+                // comment is orphaned its offset/coords are collapsed, so the fast paths above
+                // cannot find it. Use the same anchor rules as the normal path, so an
+                // indistinguishable duplicate is flagged for review instead of guessed.
+                const recovered = this.resolveAnchor(fileContent, comment);
+                if (recovered) {
+                    comment.startOffset = recovered.start;
+                    comment.endOffset   = recovered.end;
+                    this.syncLineCoordsFromOffset(fileContent, comment);
+                    comment.isOrphaned = false;
+                    comment.anchorNeedsReview = recovered.kind === "loose" || recovered.score < 0.9;
                     changed = true;
                 }
                 continue;
@@ -340,46 +345,6 @@ export class CommentManager {
             }
         }
         return changed;
-    }
-
-    // Recovers an orphaned comment by locating its exact selected text anywhere in the
-    // file. An exact string match already implies identical content; the hash check is
-    // defense-in-depth. When the text appears more than once, the occurrence closest to
-    // the comment's last-known offset wins, so nearby duplicates are preferred.
-    private recoverOrphanByExactText(fileContent: string, comment: Comment): boolean {
-        const text = comment.selectedText;
-        if (!text || text.length < this.MIN_TEXT_LENGTH) return false;
-
-        const hint = comment.startOffset ?? 0;
-        let bestStart = -1;
-        let bestDistance = Infinity;
-        for (let idx = fileContent.indexOf(text); idx !== -1; idx = fileContent.indexOf(text, idx + 1)) {
-            const distance = Math.abs(idx - hint);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestStart = idx;
-            }
-        }
-        if (bestStart === -1) return false;
-
-        const startOffset = bestStart;
-        const endOffset = bestStart + text.length;
-
-        if (comment.selectedTextHash &&
-            this.generateHash(fileContent.substring(startOffset, endOffset)) !== comment.selectedTextHash) {
-            return false;
-        }
-
-        const start = this.offsetToLineChar(fileContent, startOffset);
-        const end   = this.offsetToLineChar(fileContent, endOffset);
-        comment.startOffset = startOffset;
-        comment.endOffset   = endOffset;
-        comment.startLine   = start.line;
-        comment.startChar   = start.char;
-        comment.endLine     = end.line;
-        comment.endChar     = end.char;
-        comment.isOrphaned  = false;
-        return true;
     }
 
     private textAtOffsetMatches(fileContent: string, comment: Comment): boolean {

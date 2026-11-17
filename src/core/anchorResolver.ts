@@ -136,10 +136,12 @@ export function findAnchor(content: string, query: AnchorQuery): AnchorMatch | n
     if (exact.length > 1) {
         const scored = rank(content, exact, query);
         const best = scored[0];
-        // Identical text in identical surroundings: still usable, but only as a low-confidence
-        // hit, because there is no evidence which occurrence the reader meant.
         const context = contextScore(content, best.start, best.end, query);
-        return { ...best, score: context > 0 ? best.score : 0.55 };
+        if (context === 0) return { ...best, score: 0.55 };
+        // Two candidates that agree with the context equally well are indistinguishable: the
+        // score must not suggest otherwise just because one happens to be nearer.
+        if (isTied(content, scored, query)) return { ...best, score: 0.5 };
+        return { ...best, score: best.score };
     }
 
     // 2. Whitespace-tolerant match: "a  b\nc" still finds "a b c".
@@ -159,12 +161,28 @@ export function findAnchor(content: string, query: AnchorQuery): AnchorMatch | n
                 // Only trust it when the surrounding text agrees; otherwise it is a guess.
                 const context = contextScore(content, best.start, best.end, query);
                 if (scored.length === 1 && context === 0) return { ...best, score: 0.5 };
-                if (context > 0) return { ...best, score: Math.min(0.95, best.score) };
+                if (context > 0) {
+                    if (isTied(content, scored, query)) return { ...best, score: 0.5 };
+                    return { ...best, score: Math.min(0.95, best.score) };
+                }
             }
         }
     }
 
     return null;
+}
+
+/**
+ * True when the best two candidates are explained equally well by the recorded context. Such a
+ * match carries no evidence of *which* copy was meant, so it must not be reported confidently
+ * just because one copy happens to be closer to the old offset.
+ */
+function isTied(content: string, scored: AnchorMatch[], query: AnchorQuery): boolean {
+    if (scored.length < 2) return false;
+    const best = contextScore(content, scored[0].start, scored[0].end, query);
+    if (best === 0) return false;
+    const second = contextScore(content, scored[1].start, scored[1].end, query);
+    return second >= best;
 }
 
 /** Context to record alongside a new selection, so a later edit can still be resolved. */

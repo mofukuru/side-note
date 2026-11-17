@@ -373,6 +373,56 @@ test("automatic repair of a pure move is allowed by default", async () => {
     ]);
 });
 
+test("a path reused by another note is reported instead of considered linked", async () => {
+    // The note moved to b.md and something else took its old path. Without the extra check the
+    // comment looks perfectly linked while its paragraph belongs to a stranger.
+    const original = "the quoted paragraph\nand one more line";
+    const replacement = "a completely different note";
+    const deps = vault({ "a.md": replacement, "notes/b.md": original });
+    const comments = [selection("c1", "a.md", "the quoted paragraph")];
+    comments[0].fileHashAtAttach = sha(original);
+    comments[0].fileSizeAtAttach = Buffer.byteLength(original);
+
+    const quiet = await resolveCommentLinks(comments, deps);
+    assert.equal(quiet.linked.length, 1);
+    assert.deepEqual(quiet.suspects, []);
+
+    const checked = await resolveCommentLinks(comments, deps, { checkReplacedPaths: true });
+    assert.equal(checked.linked.length, 0);
+    assert.equal(checked.suspects.length, 1);
+    assert.equal(checked.suspects[0].needsConfirmation, true);
+    assert.deepEqual(checked.suspects[0].candidates.map(c => c.path), ["notes/b.md"]);
+});
+
+test("an edited note that still contains the quote is not a suspect", async () => {
+    const original = "keep this quote please";
+    const edited = "an introduction line\nkeep this quote please\nand an appendix";
+    const deps = vault({ "a.md": edited });
+    const comments = [selection("c1", "a.md", "keep this quote")];
+    comments[0].fileHashAtAttach = sha(original);
+    comments[0].fileSizeAtAttach = Buffer.byteLength(original);
+
+    const report = await resolveCommentLinks(comments, deps, { checkReplacedPaths: true });
+
+    assert.equal(report.linked.length, 1);
+    assert.deepEqual(report.suspects, []);
+});
+
+test("note comments are never treated as replaced", async () => {
+    // A note comment has no quote to compare, so there is nothing to prove and nothing to flag.
+    const deps = vault({ "a.md": "whatever content" });
+    const comments = [note("c1", "a.md", {
+        isNoteComment: true,
+        fileHashAtAttach: sha("something else entirely"),
+        fileSizeAtAttach: 22,
+    })];
+
+    const report = await resolveCommentLinks(comments, deps, { checkReplacedPaths: true });
+
+    assert.equal(report.linked.length, 1);
+    assert.deepEqual(report.suspects, []);
+});
+
 test("basename and dirname handle flat and nested paths", () => {
     assert.equal(basename("a.md"), "a.md");
     assert.equal(basename("x/y/a.md"), "a.md");

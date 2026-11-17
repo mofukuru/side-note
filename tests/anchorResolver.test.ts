@@ -97,6 +97,18 @@ test("CRLF content is handled once the caller normalises it", () => {
     assert.equal(crlf.slice(match.start, match.end), "two three");
 });
 
+test("identical quotes in identical surroundings are not confidently matched", () => {
+    // Both copies agree with the recorded context equally well, so there is no evidence which
+    // one was meant; being closer to the old offset must not turn that into a confident match.
+    const block = "before\nsame sentence\nAfter";
+    const note = `${block}\nseparator\n${block}`;
+
+    const match = findAnchor(note, { text: "same sentence", prefix: "before\n", suffix: "\nAfter" });
+
+    assert.ok(match);
+    assert.ok(match.score <= 0.6, `expected an ambiguous match, got ${match?.score}`);
+});
+
 test("captureContext stores up to 32 characters on each side", () => {
     const long = "a".repeat(50) + "quote" + "b".repeat(50);
     const { prefix, suffix } = captureContext(long, 50, 55);

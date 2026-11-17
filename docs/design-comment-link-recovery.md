@@ -77,6 +77,7 @@ A pure module: it receives the comments plus a read-only view of the vault (`lis
 | Tier | Evidence | Available for | Decision |
 |---|---|---|---|
 | S1 | path exists | everything | nothing to do |
+| S1✱ | path exists, but the quoted text is gone **and** the content no longer matches the recorded hash | selection comments, review command only | reported as a suspect: the path may have been reused by another note |
 | S2 | content hash recorded at attach time | comments created since this feature | **automatic** when unique |
 | S3 | same basename **and** the quoted text is in the file | selection comments | **automatic** when unique |
 | S4 | same basename only, unique | selection comments | ask |
@@ -99,7 +100,7 @@ An empty-note hash is ignored: every empty file shares the same SHA-256, so it i
 | confirmation | S4/S5/S6 | modal lists candidates with the evidence; one click applies |
 | marking | S7 | `Note not found` badge + counter; user picks a note or deletes the comments |
 
-Order of a write: **backup → rewrite `filePath` → refresh fingerprints → save → read `data.json` back and verify → append audit**. If the backup cannot be written, nothing is changed. If the read-back does not contain the new paths, the repair reports a failure instead of claiming success — that exact false-success was observed once during development and is now guarded against.
+Order of a write: **backup → rewrite `filePath` → refresh fingerprints → save → read `data.json` back and verify → append audit**. The read-back compares **per comment id**, not per path: a path-level check would pass when the file exists but the comment that was supposed to move there did not. If the backup cannot be written, nothing is changed; if the read-back does not match, the repair reports a failure instead of claiming success — that exact false-success was observed once during development and is now guarded against.
 
 Backups are pruned to the five most recent `data.v1-backup-<stamp>.json` files, at load and after each write. Only files matching that exact pattern are deleted; `data.json` and a hand-made `data.v1-backup.json` are never touched.
 
@@ -141,7 +142,7 @@ Plus one setting: `autoRelink: boolean` (default `true`).
 
 ## 8. Limits
 
-- **Historic comments cannot be repaired automatically**: they carry no content hash, and a note-level comment carries no quote. In a real vault, the first run will list every old comment for the user to decide.
+- **Comments without a fingerprint cannot be matched by content**: they carry no `fileHashAtAttach`, so a rename cannot be recovered automatically. They can still be recovered by S3 (same file name, quoted text still present), which never needed a fingerprint; anything else is a human decision. A note-level comment has no quote at all, so it always ends up in the review list.
 - A deleted note has no candidate at all; only a human can say where those comments belong.
 - A note whose content changed after its comments were created has a stale hash, so S2 falls back to S5/S7.
 - Anchor drift after edits is out of scope (P1).

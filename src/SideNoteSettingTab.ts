@@ -214,7 +214,7 @@ export class SideNoteSettingTab extends PluginSettingTab {
                 button
                     .setButtonText("Rescan")
                     .onClick(async () => {
-                        await this.plugin.scanCommentLinks(true);
+                        await this.plugin.scanCommentLinks(true, { autoApply: false });
                         this.display();
                     })
             )

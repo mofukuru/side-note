@@ -120,3 +120,46 @@ test("a quote that no longer exists stays orphaned", () => {
 
     assert.equal(comment.isOrphaned, true);
 });
+
+// The resolver returning a low score is not enough: the comment record has to carry the flag,
+// on both the normal path and the orphan-recovery path. Otherwise a tie is accepted silently.
+const ambiguousNote = (): string => {
+    const block = "before\nsame sentence\nAfter";
+    return `${block}\nseparator\n${block}`;
+};
+
+test("an ambiguous duplicate is flagged on the normal recovery path", () => {
+    const content = ambiguousNote();
+    const comment = makeComment({
+        selectedText: "same sentence",
+        startLine: 0, startChar: 0,
+        prefix: "before\n",
+        suffix: "\nAfter",
+    });
+    // Stale offsets that cannot match, so the fast paths are skipped.
+    comment.startOffset = 0;
+    comment.endOffset = 3;
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(comment.isOrphaned, false, "the text exists, so the comment is not orphaned");
+    assert.equal(comment.anchorNeedsReview, true, "but which copy is unknown, so it needs review");
+});
+
+test("an ambiguous duplicate is flagged on the orphan recovery path", () => {
+    const content = ambiguousNote();
+    const comment = makeComment({
+        selectedText: "same sentence",
+        startLine: 0, startChar: 0,
+        prefix: "before\n",
+        suffix: "\nAfter",
+    });
+    comment.isOrphaned = true;
+    comment.startOffset = 0;
+    comment.endOffset = 3;
+
+    new CommentManager([comment]).updateCommentCoordinatesForFile(content, "note.md");
+
+    assert.equal(comment.isOrphaned, false, "the orphan recovery found the text again");
+    assert.equal(comment.anchorNeedsReview, true, "and it inherited the same ambiguity rule");
+});

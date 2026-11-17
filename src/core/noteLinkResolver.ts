@@ -78,6 +78,21 @@ export interface LinkReport {
     linked: FileLinkResult[];
     missing: FileLinkResult[];
     bulk: BulkProposal[];
+    /**
+     * Comments whose path still exists but whose note seems to have been replaced: the quoted
+     * text is gone and the content no longer matches the fingerprint taken when the comment
+     * was created. Reported for confirmation instead of counting as "linked".
+     */
+    suspects: FileLinkResult[];
+}
+
+export interface ResolveOptions {
+    /**
+     * Read every linked note to detect a path that was reused by a different note. Off for the
+     * periodic scan (it would hash the whole vault every three minutes), on for the review
+     * command, which is user-initiated.
+     */
+    checkReplacedPaths?: boolean;
 }
 
 export function normalizePath(path: string): string {
@@ -325,6 +340,7 @@ function collectBulkProposals(missing: FileLinkResult[]): BulkProposal[] {
 export async function resolveCommentLinks(
     comments: CommentLinkInput[],
     deps: ResolverDeps,
+    options: ResolveOptions = {},
 ): Promise<LinkReport> {
     const notes = deps.listNotes().map(normalizePath);
     const noteSet = new Set(notes);
@@ -346,20 +362,33 @@ export async function resolveCommentLinks(
 
     const linked: FileLinkResult[] = [];
     const missing: FileLinkResult[] = [];
+    const suspects: FileLinkResult[] = [];
+    const contentCache = new Map<string, string | null>();
+    const read = async (path: string): Promise<string | null> => {
+        if (!contentCache.has(path)) contentCache.set(path, await deps.readNote(path));
+        return contentCache.get(path) ?? null;
+    };
 
     for (const [path, groupComments_] of groups) {
         // Prefer the file system over the index when the caller can ask it.
         const exists = deps.exists ? await deps.exists(path) : noteSet.has(path);
         if (exists) {
-            linked.push({
-                path,
-                commentIds: groupComments_.map(c => c.id),
-                exists: true,
-                evidence: "S1",
-                candidates: [],
-                autoRepairPath: null,
-                needsConfirmation: false,
-            });
+            const suspect = options.checkReplacedPaths
+                ? await detectReplacedNote(path, groupComments_, deps, read)
+                : null;
+            if (suspect) {
+                suspects.push(suspect);
+            } else {
+                linked.push({
+                    path,
+                    commentIds: groupComments_.map(c => c.id),
+                    exists: true,
+                    evidence: "S1",
+                    candidates: [],
+                    autoRepairPath: null,
+                    needsConfirmation: false,
+                });
+            }
             continue;
         }
 
@@ -379,6 +408,54 @@ export async function resolveCommentLinks(
         linked,
         missing,
         bulk: collectBulkProposals(missing),
+        suspects,
+    };
+}
+
+/**
+ * A path can outlive its note: an external tool moves A to B and something else creates a new
+ * file at A. The comment still "finds" its path, so it would be reported as linked while the
+ * quoted text is gone and the content belongs to a stranger.
+ *
+ * A note comment has nothing to check against, so only comments with a quote and a recorded
+ * fingerprint are examined. Editing a note is normal and must not be flagged: the quote has to
+ * be missing *and* the content has to differ from the fingerprint.
+ */
+async function detectReplacedNote(
+    path: string,
+    comments: CommentLinkInput[],
+    deps: ResolverDeps,
+    read: (path: string) => Promise<string | null>,
+): Promise<FileLinkResult | null> {
+    const selection = comments.filter(c => !c.isNoteComment && (c.selectedText ?? "").length >= MIN_QUOTE_LENGTH);
+    if (!selection.length) return null;
+
+    const content = await read(path);
+    if (content === null) return null;
+    if (selection.some(c => content.includes(c.selectedText ?? ""))) return null;
+
+    const fingerprint = comments.find(c => c.fileHashAtAttach && c.fileSizeAtAttach !== 0);
+    if (!fingerprint?.fileHashAtAttach) return null;
+    if (await deps.hashText(content) === fingerprint.fileHashAtAttach) return null;
+
+    // The note at this path is not the one the comment was written on. Offer the notes whose
+    // size matches the recorded one as candidates; none may exist, which is a valid answer.
+    const size = fingerprint.fileSizeAtAttach;
+    const sameSize = size === undefined
+        ? []
+        : (deps.listNotes()
+            .map(normalizePath)
+            .filter(candidate => candidate !== path && deps.sizeOf?.(candidate) === size));
+    const matches = await matchByHash(sameSize, deps, fingerprint.fileHashAtAttach);
+
+    return {
+        path,
+        commentIds: comments.map(c => c.id),
+        exists: true,
+        evidence: "S1",
+        candidates: matches.map(candidate => ({ path: candidate, reasons: ["content hash"] })),
+        autoRepairPath: null,
+        needsConfirmation: true,
     };
 }
 
