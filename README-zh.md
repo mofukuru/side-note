@@ -93,7 +93,7 @@
 | `prefix` / `suffix` | 选区前后各最多 32 字符的上下文 |
 | `anchorNeedsReview` | 锚点是宽松匹配得到的，建议人工复核 |
 
-插件目录新增文件：`link-repair.log`（审计）、`build-marker.json`（记录当前加载的构建哈希，便于排查）、`data.v1-backup-<时间戳>.json`（备份，自动保留 5 份）。
+插件目录新增文件：`link-repair.log`（审计日志，一行一条 JSON）、`data.v1-backup-<时间戳>.json`（写入前备份，自动保留最近 5 份）。
 
 ## 五、已知限制
 

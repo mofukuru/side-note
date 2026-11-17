@@ -106,9 +106,6 @@ export default class SideNote extends Plugin {
     async onload() {
         await this.loadPluginData();
 
-        // Diagnostic: record which bundle is actually running. Without this there is no way to
-        // tell from the outside whether a reload picked up the freshly built main.js.
-        void this.writeBuildMarker();
         // Keep the plugin folder tidy even if no repair happens during this session.
         void this.pruneOldBackups();
 
@@ -603,27 +600,6 @@ export default class SideNote extends Plugin {
         if (this.manifest.dir) return this.manifest.dir;
         const configDir = this.app.vault.configDir || ".obsidian";
         return `${configDir}/plugins/${this.manifest.id}`;
-    }
-
-    /**
-     * Writes the SHA-256 of the running bundle plus a timestamp, so a stale reload is visible
-     * from disk instead of being guessed from behaviour.
-     */
-    private async writeBuildMarker(): Promise<void> {
-        try {
-            const folder = this.pluginFolder();
-            const adapter = this.app.vault.adapter;
-            const source = await adapter.read(`${folder}/main.js`);
-            const marker = {
-                loadedAt: new Date().toISOString(),
-                version: this.manifest.version,
-                mainJsSha256: await generateHash(source),
-                autoRelink: this.settings.autoRelink,
-            };
-            await adapter.write(`${folder}/build-marker.json`, JSON.stringify(marker, null, 2));
-        } catch (error) {
-            console.warn("SideNote: could not write the build marker", error);
-        }
     }
 
     /** Copies data.json beside itself before the first write of a repair batch. */
