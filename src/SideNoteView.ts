@@ -6,6 +6,7 @@ import type { CustomViewState } from "./types";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { ConfirmDiscardModal } from "./ConfirmDiscardModal";
 import { generateCommentId } from "./utils";
+import { attachLinkSuggest } from "./LinkSuggestModal";
 
 interface PendingAdd {
     filePath: string;
@@ -416,11 +417,13 @@ export class SideNoteView extends ItemView {
         if (this.editingSelectionStart !== null && this.editingSelectionEnd !== null) {
             textarea.setSelectionRange(this.editingSelectionStart, this.editingSelectionEnd);
         }
-        textarea.addEventListener('input', () => {
+        const syncEditDraft = () => {
             this.editingDraft = textarea.value;
             this.editingSelectionStart = textarea.selectionStart;
             this.editingSelectionEnd = textarea.selectionEnd;
-        });
+        };
+        textarea.addEventListener('input', syncEditDraft);
+        attachLinkSuggest(this.app, textarea, filePath, syncEditDraft);
 
         const doSave = async () => {
             const text = this.editingDraft.trim();
@@ -472,11 +475,13 @@ export class SideNoteView extends ItemView {
         if (this.pendingAddSelectionStart !== null && this.pendingAddSelectionEnd !== null) {
             textarea.setSelectionRange(this.pendingAddSelectionStart, this.pendingAddSelectionEnd);
         }
-        textarea.addEventListener('input', () => {
+        const syncAddDraft = () => {
             this.pendingAddDraft = textarea.value;
             this.pendingAddSelectionStart = textarea.selectionStart;
             this.pendingAddSelectionEnd = textarea.selectionEnd;
-        });
+        };
+        textarea.addEventListener('input', syncAddDraft);
+        attachLinkSuggest(this.app, textarea, pa.filePath, syncAddDraft);
 
         const saveNew = async () => {
             const text = this.pendingAddDraft.trim();
