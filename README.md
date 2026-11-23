@@ -12,12 +12,13 @@ SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add 
   - **Sidebar Mode**: Open comments in the right sidebar for persistent viewing
   - **Split View Mode**: Open comments in a split pane beside your note
 - **Visual Highlights**: Commented text is automatically highlighted in the editor with a configurable style (default: yellow background with underline)
-- **Auto-Tracking**: Comments automatically follow their text as you edit your notes using hash-based matching
+- **Auto-Tracking**: Comments automatically follow their text as you edit your notes. Correcting words inside a highlight keeps the comment attached and updates its quoted text
 - **Click to Navigate**:
   - Click any comment in the side pane to jump to its location in the editor
   - Double-click any comment to open the edit modal directly
   - Click any highlighted text in the editor to open the sidebar and highlight the corresponding comment
-- **Internal Link Support**: `[[WikiLinks]]` inside comment text are fully clickable and open the linked note
+- **Internal Link Support**: `[[WikiLinks]]` inside comment text are fully clickable and open the linked note. Type `[[` in the comment box to pick a note from a fuzzy search and insert the link
+- **Images**: Paste or drop images into the comment box. They are saved to your attachment folder and embedded in the comment
 - **Search Filter**: Filter comments in real time by typing in the search bar at the top of the sidebar (matches highlighted text and comment body; works in both Current File and All Notes views)
 - **Inline Editing**: Add and edit comments directly in the sidebar via an inline textarea — no popup modal. `Cmd/Ctrl + Enter` saves, `Esc` cancels (both shown as an on-screen hint while editing).
 - **Quote Selection**: While editing a comment, click "Quote selection" to insert the text currently selected in the note as a blockquote at the cursor position
@@ -205,6 +206,29 @@ Access settings via Settings → Side Note:
 - Uses CodeMirror 6 decorations for in-editor highlighting
 
 ## Version History
+
+### 1.4.0
+- **Comments now follow edits made inside their highlight** (#19)
+  - Correcting a word, adding text, or deleting a few characters inside a highlight used to orphan the comment, because the highlighted text no longer matched exactly
+  - When every change that touches a highlight lies inside it, the comment now takes the edited text as its quoted text and stays attached. Deleting all of the highlighted text, or an edit that crosses a highlight boundary, still orphans the comment as before
+- **Added a note picker for links in the comment box** (#19)
+  - Typing `[[` in the add or edit form opens a fuzzy search over the vault's files, and the chosen file is inserted as a link. Typing `![[` inserts an embed instead
+  - The link text follows Obsidian's link settings (e.g. shortest path when possible)
+- **Added pasting and dropping images into the comment box** (#48)
+  - Images are saved as attachments of the note, following Obsidian's "Default location for new attachments" setting, and embedded in the comment in your preferred link format
+  - Images pasted from the clipboard are named `Pasted image YYYYMMDDHHmmss.png`, as in the note editor. Dropped files keep their names
+
+### 1.3.1
+- **Fixed editor highlights missing in notes with CRLF line endings** (#43)
+  - Offsets were counted with the `\r` characters included, while the editor does not see them, so highlights were shifted or missing. Offsets are now counted in the editor's LF space, and offsets already stored by 1.3.0 are repaired
+- **Fixed a startup error when a note with rendered tables is open** (#45, contributed by huaqian0226)
+- Updated the repository URLs after the repository was renamed to `side-note` (#42)
+
+### 1.3.0
+- **Added per-comment highlight colors** (#40)
+  - The sidebar `...` menu has a row of swatches: default, red, orange, green, blue, purple. The first swatch returns to the "Highlight color" setting
+  - The color applies to highlights in the editor, Reading view and Live Preview tables, and shows as a stripe on the sidebar card
+- Adding, deleting or resolving a comment is now reflected immediately in an open Reading view
 
 ### 1.2.0
 - **Added "Highlight selection (without comment)" command** (#33)
