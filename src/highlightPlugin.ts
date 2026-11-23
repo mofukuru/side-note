@@ -4,6 +4,7 @@ import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import type { ChangeSet, Text } from "@codemirror/state";
 import type { SideNotePlugin } from "./types";
+import { mapRangeThroughInnerEdit } from "./core/innerEdit";
 
 export interface EditorWithCM {
     cm?: EditorView;
@@ -164,8 +165,21 @@ export function createHighlightPlugin(plugin: SideNotePlugin) {
                         }
                     }
 
-                    if (newFrom < newTo && doc.sliceString(newFrom, newTo) === selectedText) {
-                        newPositions.set(id, { from: newFrom, to: newTo, selectedText });
+                    let currentText = selectedText;
+                    if (!(newFrom < newTo && doc.sliceString(newFrom, newTo) === selectedText)) {
+                        // The user edited inside the highlight (e.g. corrected a word). The
+                        // comment follows the edited text instead of being orphaned (#19).
+                        const inner = mapRangeThroughInnerEdit(update.changes, from, to);
+                        if (inner) {
+                            newFrom = inner.from;
+                            newTo   = inner.to;
+                            currentText = doc.sliceString(newFrom, newTo);
+                            plugin.commentManager.updateSelectedText(id, currentText);
+                        }
+                    }
+
+                    if (newFrom < newTo && doc.sliceString(newFrom, newTo) === currentText) {
+                        newPositions.set(id, { from: newFrom, to: newTo, selectedText: currentText });
                         const comment = plugin.commentManager.getComments().find(c => c.id === id);
                         if (comment) {
                             const sl = doc.lineAt(newFrom);
