@@ -60,6 +60,18 @@ export class CommentManager {
         this.comments.push(newComment);
     }
 
+    /**
+     * Replaces the text a comment is anchored to, after the user edited inside the highlight.
+     * The hash is recomputed so the later hash-based searches look for the new text.
+     */
+    updateSelectedText(id: string, newText: string): boolean {
+        const comment = this.comments.find(c => c.id === id);
+        if (!comment || comment.selectedText === newText) return false;
+        comment.selectedText = newText;
+        comment.selectedTextHash = this.generateHash(newText);
+        return true;
+    }
+
     editComment(id: string, newCommentText: string) {
         const comment = this.comments.find(c => c.id === id);
         if (comment) {

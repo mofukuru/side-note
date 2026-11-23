@@ -57,3 +57,20 @@ test("LF file: correct offsets are left unchanged", () => {
     assert.equal(changed, false);
     assert.equal(comment.startOffset, lfOffset);
 });
+
+test("after an inner edit, the new text is found on the next file update", () => {
+    // The editor updated the comment to the edited text (#19); the file on disk now has it.
+    const edited = "# Title\nfirst line\nsecond tarnished line\n";
+    const offset = edited.indexOf("tarnished");
+    const comment = makeComment({
+        selectedText: "target", startLine: 2, startChar: 7,
+        startOffset: offset, endOffset: offset + "tarnished".length,
+    });
+    const manager = new CommentManager([comment]);
+    assert.equal(manager.updateSelectedText("c1", "tarnished"), true);
+    assert.equal(comment.selectedTextHash, sha256("tarnished"));
+
+    manager.updateCommentCoordinatesForFile(edited, "note.md");
+    assert.equal(comment.isOrphaned, false);
+    assert.equal(comment.startOffset, offset);
+});
