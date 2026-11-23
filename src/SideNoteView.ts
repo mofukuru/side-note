@@ -1,5 +1,6 @@
 import { ItemView, WorkspaceLeaf, TFile, MarkdownView, Notice, ViewStateResult, MarkdownRenderer, Scope, Platform, setIcon } from "obsidian";
 import type { SideNotePlugin } from "./types";
+import { attachImagePaste } from "./imagePaste";
 import { COMMENT_COLORS } from "./types";
 import type { Comment } from "./commentManager";
 import type { CustomViewState } from "./types";
@@ -429,6 +430,11 @@ export class SideNoteView extends ItemView {
         };
 
         this.pushEditScope(() => void doSave(), onCancel);
+        attachImagePaste(this.app, textarea, filePath, (value) => {
+            this.editingDraft = value;
+            this.editingSelectionStart = textarea.selectionStart;
+            this.editingSelectionEnd = textarea.selectionEnd;
+        });
 
         const actionsDiv = form.createDiv({ cls: "sidenote-edit-actions" });
         const quoteBtn = actionsDiv.createEl("button", { text: "Quote selection", cls: "sidenote-edit-quote" });
@@ -517,6 +523,11 @@ export class SideNoteView extends ItemView {
         };
 
         this.pushEditScope(() => void saveNew(), cancelNew);
+        attachImagePaste(this.app, textarea, pa.filePath, (value) => {
+            this.pendingAddDraft = value;
+            this.pendingAddSelectionStart = textarea.selectionStart;
+            this.pendingAddSelectionEnd = textarea.selectionEnd;
+        });
 
         const actionsDiv = form.createDiv({ cls: "sidenote-edit-actions" });
         const quoteBtn = actionsDiv.createEl("button", { text: "Quote selection", cls: "sidenote-edit-quote" });
